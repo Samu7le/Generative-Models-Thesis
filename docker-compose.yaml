@@ -1,0 +1,25 @@
+version: '3.8'
+
+services:
+  experiment:
+    build: .
+    container_name: tesi_generative_experiment
+    # Mantiene il container in ascolto in caso di crash per debug, 
+    # oppure rimuovi questa riga e usa il CMD del Dockerfile
+    # command: tail -f /dev/null 
+    volumes:
+      # Mappa il codice locale nel container per evitare di fare la build ad ogni modifica del codice
+      - ./src:/app/src
+      # Persistenza del dataset ChestMNIST (evita download continui)
+      - ./data:/app/data
+      # Persistenza dei risultati (modelli pesi, immagini generate, CSV metriche)
+      - ./results:/app/results
+    environment:
+      - TORCH_HOME=/app/data/models  # Salva i modelli pre-addestrati qui se usati
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

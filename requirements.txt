@@ -1,0 +1,17 @@
+# Deep Learning Core
+torch>=2.0.0
+torchvision>=0.15.0
+
+# Dataset
+medmnist
+
+# Metriche e manipolazione dati
+numpy
+scikit-image   # Per PSNR e SSIM
+scikit-learn   # Per MSE (opzionale, numpy va bene uguale)
+pandas         # Per salvare i risultati tabellari (es. tempi di esecuzione)
+
+# Utility e visualizzazione
+matplotlib     # Per visualizzare inpainting e denoising
+tqdm           # Per le barre di avanzamento nei loop di training/inference
+diffusers      # Opzionale: utile se non scrivi il diffusion model da zero
