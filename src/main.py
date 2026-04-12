@@ -2,6 +2,7 @@ import os
 import time
 import copy
 import torch
+import numpy as np
 from torch import optim
 from torch.utils.data import DataLoader
 import torchvision.transforms as transforms
@@ -25,7 +26,10 @@ def main():
     
     data_transform = transforms.Compose([transforms.ToTensor()])
     train_dataset = DataClass(split='train', transform=data_transform, download=True, root='./data')
+    test_dataset = DataClass(split='test', transform=data_transform, download=True, root='./data') # Aggiunto test set
+    
     train_loader = DataLoader(dataset=train_dataset, batch_size=128, shuffle=True)
+    test_loader = DataLoader(dataset=test_dataset, batch_size=1, shuffle=False)
 
     # --- 2. INIZIALIZZAZIONE MODELLI ---
     epochs = 100
@@ -46,7 +50,6 @@ def main():
     print(f"{'='*50}")
     
     for epoch in range(epochs):
-        # Il VAE si allena solo fino all'epoca 20
         if epoch < 20:
             vae.train()
             running_loss_vae = 0.0
@@ -57,7 +60,6 @@ def main():
         for images, _ in train_loader:
             images = images.to(device)
 
-            # Training VAE (limitato)
             if epoch < 20:
                 optimizer_vae.zero_grad()
                 vae_noisy_img = apply_noise_levels(images, levels=[0.3])[0.3]
@@ -67,7 +69,6 @@ def main():
                 optimizer_vae.step()
                 running_loss_vae += loss_v.item()
 
-            # Training DDPM (completo)
             optimizer_ddpm.zero_grad()
             t = torch.randint(0, ddpm.time_steps, (images.size(0),), device=device, dtype=torch.long)
             epsilon = torch.randn_like(images)
@@ -78,100 +79,121 @@ def main():
             optimizer_ddpm.step()
             running_loss_ddpm += loss_d.item()
 
-        # --- GESTIONE DEI LOG E DEI SALVATAGGI ---
         loss_history["DDPM"].append(running_loss_ddpm / len(train_loader))
-
         if epoch < 20:
             loss_history["VAE"].append(running_loss_vae / len(train_loader))
             print(f"Epoca [{epoch+1:3d}/{epochs}] | Loss VAE: {loss_history['VAE'][-1]:.4f} | Loss DDPM: {loss_history['DDPM'][-1]:.4f}")
         else:
             print(f"Epoca [{epoch+1:3d}/{epochs}] | Loss DDPM: {loss_history['DDPM'][-1]:.4f}")
 
-        # Traguardo 20 epoche
         if epoch + 1 == 20:
-            print(f"\n{'-'*50}")
-            print(" | 20 EPOCHE RAGGIUNTE |")
-            print(" Salvataggio dello stato dei modelli su disco...")
             vae_final_weights = copy.deepcopy(vae.state_dict())
             ddpm_20_weights = copy.deepcopy(ddpm.network.state_dict())
-            
             torch.save(vae_final_weights, "results/vae_20_epochs.pth")
             torch.save(ddpm_20_weights, "results/ddpm_20_epochs.pth")
-            print(" VAE DISATTIVATO. Ha completato il suo addestramento.")
-            print(f"{'-'*50}")
-            print(f" INIZIO ADDESTRAMENTO ESCLUSIVO DDPM (Fase 2: 80 Epoche)")
-            print(f"{'-'*50}\n")
+            print(f"\n{'*'*20} TRAGUARDO 20 EPOCHE {'*'*20}\n")
 
-    # Fine addestramento DDPM
-    print(f"\n{'-'*50}")
-    print(" | 100 EPOCHE RAGGIUNTE |")
-    print(" Salvataggio dello stato finale del DDPM su disco...")
     ddpm_100_weights = copy.deepcopy(ddpm.network.state_dict())
     torch.save(ddpm_100_weights, "results/ddpm_100_epochs.pth")
-    print(f"{'-'*50}\n")
-
     plot_training_curves(loss_history)
 
-    # --- 4. INFERENZA COMPARATIVA ---
-    print("\nInizio fase di inferenza e calcolo metriche...")
-    test_image = train_dataset[0][0].unsqueeze(0).to(device)
+    # --- 4. VALUTAZIONE STATISTICA SU TUTTO IL TEST SET ---
+    print("\nInizio valutazione statistica sul dataset di test...")
     noise_levels = [0.1, 0.3, 0.5]
-    noisy_images = apply_noise_levels(test_image, noise_levels)
-
-    livello_a_timestep = {
-        0.1: int(ddpm.time_steps * 0.15),
-        0.3: int(ddpm.time_steps * 0.40),
-        0.5: int(ddpm.time_steps * 0.70)
+    livello_a_timestep = {0.1: int(ddpm.time_steps * 0.15), 0.3: int(ddpm.time_steps * 0.40), 0.5: int(ddpm.time_steps * 0.70)}
+    
+    # Struttura per accumulare i dati: stats[modello][livello][metrica] = []
+    model_stats = {
+        "VAE_20": {lvl: {"MSE": [], "PSNR": [], "SSIM": [], "Time": []} for lvl in noise_levels},
+        "DDPM_20": {lvl: {"MSE": [], "PSNR": [], "SSIM": [], "Time": []} for lvl in noise_levels},
+        "DDPM_100": {lvl: {"MSE": [], "PSNR": [], "SSIM": [], "Time": []} for lvl in noise_levels}
     }
 
-    # Strutture dati per salvare i risultati
-    recon_v, recon_d20, recon_d100 = {}, {}, {}
-    met_v, met_d20, met_d100 = {}, {}, {}
-    tempi_v, tempi_d20, tempi_d100 = {}, {}, {}
+    # Helper per i test
+    def run_eval_batch(model_key, weights, is_vae=False):
+        if is_vae:
+            vae.load_state_dict(weights)
+            vae.eval()
+        else:
+            ddpm.network.load_state_dict(weights)
+            ddpm.eval()
 
-    # 4.1 Inferenza VAE (unico modello a 20 epoche)
-    vae.load_state_dict(vae_final_weights)
-    vae.eval()
-    with torch.no_grad():
-        for level in noise_levels:
-            noisy_img = noisy_images[level]
-            start_t = time.perf_counter()
-            r_vae, _, _ = vae(noisy_img)
-            tempi_v[level] = time.perf_counter() - start_t
-            recon_v[level] = r_vae
-            met_v[level] = calculate_metrics(test_image, r_vae)
-
-    # Funzione helper per le due iterazioni del DDPM
-    def inferenza_ddpm(pesi):
-        ddpm.network.load_state_dict(pesi)
-        ddpm.eval()
-        r_d, m_d, t_d = {}, {}, {}
         with torch.no_grad():
-            for level in noise_levels:
-                noisy_img = noisy_images[level]
-                start_t = time.perf_counter()
-                start_step = livello_a_timestep[level]
-                r_diff = ddpm.sample(noisy_img, start_t=start_step) 
-                t_d[level] = time.perf_counter() - start_t
-                r_d[level] = r_diff
-                m_d[level] = calculate_metrics(test_image, r_diff)
-        return r_d, m_d, t_d
+            # Testiamo su 100 campioni per bilanciare precisione e tempo
+            for i, (img, _) in enumerate(test_loader):
+                if i >= 100: break 
+                img = img.to(device)
+                noisy_imgs = apply_noise_levels(img, noise_levels)
 
-    # 4.2 Inferenza DDPM a 20 e 100 epoche
-    print("Eseguendo test DDPM a 20 epoche...")
-    recon_d20, met_d20, tempi_d20 = inferenza_ddpm(ddpm_20_weights)
+                for lvl in noise_levels:
+                    start_t = time.perf_counter()
+                    if is_vae:
+                        recon, _, _ = vae(noisy_imgs[lvl])
+                    else:
+                        recon = ddpm.sample(noisy_imgs[lvl], start_t=livello_a_timestep[lvl])
+                    
+                    elapsed = time.perf_counter() - start_t
+                    m = calculate_metrics(img, recon)
+                    
+                    model_stats[model_key][lvl]["MSE"].append(m["MSE"])
+                    model_stats[model_key][lvl]["PSNR"].append(m["PSNR"])
+                    model_stats[model_key][lvl]["SSIM"].append(m["SSIM"])
+                    model_stats[model_key][lvl]["Time"].append(elapsed)
 
-    print("Eseguendo test DDPM a 100 epoche...")
-    recon_d100, met_d100, tempi_d100 = inferenza_ddpm(ddpm_100_weights)
+    print("Valutazione VAE 20 epoche...")
+    run_eval_batch("VAE_20", vae_final_weights, is_vae=True)
+    print("Valutazione DDPM 20 epoche...")
+    run_eval_batch("DDPM_20", ddpm_20_weights, is_vae=False)
+    print("Valutazione DDPM 100 epoche...")
+    run_eval_batch("DDPM_100", ddpm_100_weights, is_vae=False)
 
-    plot_inference_results_comparative(
-        test_image, noisy_images, 
-        recon_v, recon_d20, recon_d100, 
-        met_v, met_d20, met_d100, 
-        tempi_v, tempi_d20, tempi_d100
-    )
+    # --- 5. STAMPA E SALVATAGGIO TABELLA FINALE ---
+    log_path = "results/final_metrics_table.txt"
+    with open(log_path, "w") as f:
+        header = f"{'Modello':<12} | {'Noise':<5} | {'MSE (avg)':<10} | {'PSNR (avg)':<10} | {'SSIM (avg)':<10} | {'Time (avg)':<10}"
+        print(f"\n{header}")
+        f.write(header + "\n" + "-"*80 + "\n")
+        
+        for m_key in model_stats:
+            for lvl in noise_levels:
+                res = model_stats[m_key][lvl]
+                mse_m, mse_s = np.mean(res["MSE"]), np.std(res["MSE"])
+                psnr_m, psnr_s = np.mean(res["PSNR"]), np.std(res["PSNR"])
+                ssim_m, ssim_s = np.mean(res["SSIM"]), np.std(res["SSIM"])
+                time_m = np.mean(res["Time"])
+                
+                row = f"{m_key:<12} | {lvl:<5.1f} | {mse_m:.4f}±{mse_s:.3f} | {psnr_m:.2f}±{psnr_s:.2f} | {ssim_m:.3f}±{ssim_s:.3f} | {time_m:.4f}s"
+                print(row)
+                f.write(row + "\n")
+
+    # --- 6. PLOT QUALITATIVO (Singola Immagine come da richiesta originale) ---
+    print("\nGenerazione plot qualitativo finale...")
+    # Riassegna per l'ultimo plot qualitativo (logica originale intatta)
+    test_img_vis = test_dataset[0][0].unsqueeze(0).to(device)
+    noisy_vis = apply_noise_levels(test_img_vis, noise_levels)
     
-    print("\nEsperimento completo! Grafici e pesi salvati in results/.")
+    # Riutilizziamo le funzioni helper per estrarre i dati per il plot
+    def get_single_inference(weights, is_vae=False):
+        if is_vae: vae.load_state_dict(weights); vae.eval()
+        else: ddpm.network.load_state_dict(weights); ddpm.eval()
+        
+        r, m, t = {}, {}, {}
+        with torch.no_grad():
+            for lvl in noise_levels:
+                start = time.perf_counter()
+                out = vae(noisy_vis[lvl])[0] if is_vae else ddpm.sample(noisy_vis[lvl], start_t=livello_a_timestep[lvl])
+                t[lvl] = time.perf_counter() - start
+                r[lvl] = out
+                m[lvl] = calculate_metrics(test_img_vis, out)
+        return r, m, t
+
+    rv, mv, tv = get_single_inference(vae_final_weights, is_vae=True)
+    rd20, md20, td20 = get_single_inference(ddpm_20_weights, is_vae=False)
+    rd100, md100, td100 = get_single_inference(ddpm_100_weights, is_vae=False)
+
+    plot_inference_results_comparative(test_img_vis, noisy_vis, rv, rd20, rd100, mv, md20, md100, tv, td20, td100)
+    
+    print(f"\nEsperimento completo! Tabella salvata in: {log_path}")
 
 if __name__ == "__main__":
     main()
